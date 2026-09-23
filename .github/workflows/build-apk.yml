@@ -109,20 +109,18 @@ jobs:
             DEST_NAME="SHEN-tunnel-ZERO_${TAG}_${ARCH}.apk"
             TARGET="release-artifacts/$DEST_NAME"
             
-            # Ensure 4-byte alignment
+            # Ensure 4-byte alignment BEFORE signing
+            TEMP_ALIGNED="temp_aligned.apk"
+            rm -f "$TEMP_ALIGNED"
             if [ -n "$ZIPALIGN" ]; then
-              $ZIPALIGN -c -v 4 "$apk" || $ZIPALIGN -f -p 4 "$apk" "$TARGET" || cp "$apk" "$TARGET"
+              $ZIPALIGN -p 4 "$apk" "$TEMP_ALIGNED" || cp "$apk" "$TEMP_ALIGNED"
             else
-              cp "$apk" "$TARGET"
+              cp "$apk" "$TEMP_ALIGNED"
             fi
             
-            if [ ! -f "$TARGET" ]; then
-              cp "$apk" "$TARGET"
-            fi
-            
-            # Explicit re-sign with apksigner if permanent keystore is present to guarantee v1 + v2 + v3 + v4 compliance
+            # Explicit sign with apksigner to enforce v1 (JAR) + v2 + v3 schemes
             if [ -f "release.keystore" ] && [ -n "$APKSIGNER" ]; then
-              echo "Applying full Google APK Signatures (v1, v2, v3, v4) on $DEST_NAME..."
+              echo "Applying full Google APK Signatures (v1, v2, v3) on $DEST_NAME..."
               $APKSIGNER sign --ks release.keystore \
                 --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
                 --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
@@ -130,8 +128,12 @@ jobs:
                 --v1-signing-enabled true \
                 --v2-signing-enabled true \
                 --v3-signing-enabled true \
-                --v4-signing-enabled false \
-                "$TARGET" || true
+                --out "$TARGET" \
+                "$TEMP_ALIGNED"
+              rm -f "$TEMP_ALIGNED"
+            else
+              cp "$TEMP_ALIGNED" "$TARGET"
+              rm -f "$TEMP_ALIGNED"
             fi
             
             # Verify signature using Android apksigner tool
