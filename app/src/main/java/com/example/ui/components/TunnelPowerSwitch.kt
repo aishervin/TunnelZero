@@ -21,7 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PowerSettingsNew
-import androidx.compose.material.ripple.rememberRipple
+import androidx.compose.material3.ripple
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -152,7 +152,7 @@ fun TunnelPowerSwitch(
           .background(buttonBgGradient)
           .clickable(
             interactionSource = remember { MutableInteractionSource() },
-            indication = rememberRipple(bounded = true, color = primaryAccentColor)
+            indication = ripple(color = primaryAccentColor)
           ) { onClick() },
         contentAlignment = Alignment.Center
       ) {
