@@ -31,17 +31,17 @@ import kotlin.random.Random
 class ShenTunnelVpnService : VpnService() {
 
   companion object {
-    const val ACTION_START = "com.example.action.SHEN_VPN_START"
-    const val ACTION_STOP = "com.example.action.SHEN_VPN_STOP"
-    const val EXTRA_NODE_ID = "com.example.extra.NODE_ID"
-    const val EXTRA_NODE_NAME = "com.example.extra.NODE_NAME"
-    const val EXTRA_COUNTRY_NAME = "com.example.extra.COUNTRY_NAME"
-    const val EXTRA_FLAG_EMOJI = "com.example.extra.FLAG_EMOJI"
-    const val EXTRA_CLIENT_ADDRESS = "com.example.extra.CLIENT_ADDRESS"
-    const val EXTRA_DNS = "com.example.extra.DNS"
-    const val EXTRA_MTU = "com.example.extra.MTU"
-    const val EXTRA_ENDPOINT = "com.example.extra.ENDPOINT"
-    const val EXTRA_IP = "com.example.extra.IP"
+    const val ACTION_START = "com.shen.tunnel.zero.action.SHEN_VPN_START"
+    const val ACTION_STOP = "com.shen.tunnel.zero.action.SHEN_VPN_STOP"
+    const val EXTRA_NODE_ID = "com.shen.tunnel.zero.extra.NODE_ID"
+    const val EXTRA_NODE_NAME = "com.shen.tunnel.zero.extra.NODE_NAME"
+    const val EXTRA_COUNTRY_NAME = "com.shen.tunnel.zero.extra.COUNTRY_NAME"
+    const val EXTRA_FLAG_EMOJI = "com.shen.tunnel.zero.extra.FLAG_EMOJI"
+    const val EXTRA_CLIENT_ADDRESS = "com.shen.tunnel.zero.extra.CLIENT_ADDRESS"
+    const val EXTRA_DNS = "com.shen.tunnel.zero.extra.DNS"
+    const val EXTRA_MTU = "com.shen.tunnel.zero.extra.MTU"
+    const val EXTRA_ENDPOINT = "com.shen.tunnel.zero.extra.ENDPOINT"
+    const val EXTRA_IP = "com.shen.tunnel.zero.extra.IP"
 
     private const val NOTIFICATION_CHANNEL_ID = "shen_tunnel_vpn_channel"
     private const val NOTIFICATION_ID = 1001
@@ -137,19 +137,26 @@ class ShenTunnelVpnService : VpnService() {
     _tunnelState.value = TunnelState.CONNECTING
     _activeNode.value = node
 
-    startForeground(NOTIFICATION_ID, buildNotification(node, "Connecting zero-trust tunnel…"))
+    val connectingNotification = buildNotification(node, "Connecting zero-trust tunnel…")
+    safeStartForeground(connectingNotification)
 
     try {
       val builder = Builder()
       builder.setSession("SHΞN™ tunnel ᴢᴇʀᴏ [${node.flagEmoji} ${node.countryName}]")
 
       // Parse IPv4 address
-      val addressClean = node.clientAddress.substringBefore("/")
-      val prefix = node.clientAddress.substringAfter("/", "32").toIntOrNull() ?: 32
-      builder.addAddress(addressClean, prefix)
+      val addressClean = node.clientAddress.substringBefore("/").trim()
+      val prefix = node.clientAddress.substringAfter("/", "32").trim().toIntOrNull() ?: 32
+      try {
+        builder.addAddress(addressClean, prefix)
+      } catch (e: Exception) {
+        builder.addAddress("10.210.230.254", 30)
+      }
 
       // Add default zero-trust route
-      builder.addRoute("0.0.0.0", 0)
+      try {
+        builder.addRoute("0.0.0.0", 0)
+      } catch (_: Exception) {}
 
       // Add DNS
       node.dns.split(",").map { it.trim() }.forEach { dnsServer ->
@@ -160,21 +167,48 @@ class ShenTunnelVpnService : VpnService() {
         }
       }
 
-      builder.setMtu(node.mtu)
+      builder.setMtu(node.mtu.coerceIn(1280, 1500))
       builder.setBlocking(false)
 
-      vpnInterface?.close()
+      try {
+        vpnInterface?.close()
+      } catch (_: Exception) {}
+      
       vpnInterface = builder.establish()
 
-      _tunnelState.value = TunnelState.CONNECTED
-      startForeground(NOTIFICATION_ID, buildNotification(node, "Connected: ${node.ipAddress}"))
-
-      startTelemetryAndPackets()
+      if (vpnInterface != null) {
+        _tunnelState.value = TunnelState.CONNECTED
+        val connectedNotification = buildNotification(node, "Connected: ${node.ipAddress}")
+        safeStartForeground(connectedNotification)
+        startTelemetryAndPackets()
+      } else {
+        _tunnelState.value = TunnelState.DISCONNECTED
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+      }
     } catch (e: Exception) {
       e.printStackTrace()
       _tunnelState.value = TunnelState.DISCONNECTED
       stopForeground(STOP_FOREGROUND_REMOVE)
       stopSelf()
+    }
+  }
+
+  private fun safeStartForeground(notification: Notification) {
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        startForeground(
+          NOTIFICATION_ID,
+          notification,
+          android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED
+        )
+      } else {
+        startForeground(NOTIFICATION_ID, notification)
+      }
+    } catch (e: Exception) {
+      try {
+        startForeground(NOTIFICATION_ID, notification)
+      } catch (_: Exception) {}
     }
   }
 
@@ -189,23 +223,28 @@ class ShenTunnelVpnService : VpnService() {
     // Non-blocking packet interface reading loop
     vpnInterface?.let { pfd ->
       packetLoopJob = serviceScope.launch(Dispatchers.IO) {
-        val inputStream = FileInputStream(pfd.fileDescriptor)
-        val outputStream = FileOutputStream(pfd.fileDescriptor)
-        val buffer = ByteBuffer.allocate(32768)
+        try {
+          val inputStream = FileInputStream(pfd.fileDescriptor)
+          val buffer = ByteBuffer.allocate(32768)
 
-        while (isActive) {
-          try {
-            val length = inputStream.channel.read(buffer)
-            if (length > 0) {
-              uploadedTotal += length
-              buffer.clear()
-            } else {
-              delay(50)
+          while (isActive && _tunnelState.value == TunnelState.CONNECTED) {
+            try {
+              if (pfd.fileDescriptor.valid()) {
+                val length = inputStream.channel.read(buffer)
+                if (length > 0) {
+                  uploadedTotal += length
+                  buffer.clear()
+                } else {
+                  delay(100)
+                }
+              } else {
+                break
+              }
+            } catch (_: Exception) {
+              break
             }
-          } catch (_: Exception) {
-            break
           }
-        }
+        } catch (_: Exception) {}
       }
     }
 
