@@ -197,6 +197,9 @@ class ShenTunnelVpnService : Service() {
     telemetryJob?.cancel()
     telemetryJob = serviceScope.launch {
       var seconds = 0L
+      var lastRx = 0L
+      var lastTx = 0L
+
       while (isActive && _tunnelState.value == TunnelState.CONNECTED) {
         delay(1000)
         seconds++
@@ -206,22 +209,24 @@ class ShenTunnelVpnService : Service() {
           null
         }
 
-        val rx = stats?.totalRx() ?: 0L
-        val tx = stats?.totalTx() ?: 0L
+        val currentRx = stats?.totalRx() ?: 0L
+        val currentTx = stats?.totalTx() ?: 0L
 
-        val durationString = String.format(
-          "%02d:%02d:%02d",
-          seconds / 3600,
-          (seconds % 3600) / 60,
-          seconds % 60
-        )
+        val rxDiff = if (lastRx > 0 && currentRx >= lastRx) currentRx - lastRx else 0L
+        val txDiff = if (lastTx > 0 && currentTx >= lastTx) currentTx - lastTx else 0L
+
+        lastRx = currentRx
+        lastTx = currentTx
+
+        val downSpeedKbps = (rxDiff * 8f) / 1024f
+        val upSpeedKbps = (txDiff * 8f) / 1024f
 
         _telemetry.value = TelemetryStats(
-          uptimeSeconds = seconds,
-          durationFormatted = durationString,
-          downloadBytes = rx,
-          uploadBytes = tx,
-          activeHandshake = (rx > 0 || tx > 0)
+          uploadSpeedKbps = upSpeedKbps,
+          downloadSpeedKbps = downSpeedKbps,
+          totalUploadedBytes = currentTx,
+          totalDownloadedBytes = currentRx,
+          sessionDurationSeconds = seconds
         )
       }
     }
