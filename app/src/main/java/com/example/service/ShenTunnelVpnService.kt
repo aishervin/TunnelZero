@@ -4,17 +4,21 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.net.VpnService
 import android.os.Build
-import android.os.ParcelFileDescriptor
+import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.model.TelemetryStats
 import com.example.model.TunnelNode
 import com.example.model.TunnelState
+import com.wireguard.android.backend.Backend
+import com.wireguard.android.backend.GoBackend
+import com.wireguard.android.backend.Tunnel
+import com.wireguard.config.Config
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,25 +27,17 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.nio.ByteBuffer
-import kotlin.random.Random
+import java.io.ByteArrayInputStream
 
-class ShenTunnelVpnService : VpnService() {
+class ShenTunnelVpnService : Service() {
 
   companion object {
     const val ACTION_START = "com.shen.tunnel.zero.action.SHEN_VPN_START"
     const val ACTION_STOP = "com.shen.tunnel.zero.action.SHEN_VPN_STOP"
-    const val EXTRA_NODE_ID = "com.shen.tunnel.zero.extra.NODE_ID"
+    const val EXTRA_CONFIG_TEXT = "com.shen.tunnel.zero.extra.CONFIG_TEXT"
     const val EXTRA_NODE_NAME = "com.shen.tunnel.zero.extra.NODE_NAME"
-    const val EXTRA_COUNTRY_NAME = "com.shen.tunnel.zero.extra.COUNTRY_NAME"
     const val EXTRA_FLAG_EMOJI = "com.shen.tunnel.zero.extra.FLAG_EMOJI"
-    const val EXTRA_CLIENT_ADDRESS = "com.shen.tunnel.zero.extra.CLIENT_ADDRESS"
-    const val EXTRA_DNS = "com.shen.tunnel.zero.extra.DNS"
-    const val EXTRA_MTU = "com.shen.tunnel.zero.extra.MTU"
     const val EXTRA_ENDPOINT = "com.shen.tunnel.zero.extra.ENDPOINT"
-    const val EXTRA_IP = "com.shen.tunnel.zero.extra.IP"
 
     private const val NOTIFICATION_CHANNEL_ID = "shen_tunnel_vpn_channel"
     private const val NOTIFICATION_ID = 1001
@@ -56,17 +52,13 @@ class ShenTunnelVpnService : VpnService() {
     val telemetry = _telemetry.asStateFlow()
 
     fun startService(context: Context, node: TunnelNode) {
+      _activeNode.value = node
       val intent = Intent(context, ShenTunnelVpnService::class.java).apply {
         action = ACTION_START
-        putExtra(EXTRA_NODE_ID, node.id)
+        putExtra(EXTRA_CONFIG_TEXT, node.toWireGuardConfig())
         putExtra(EXTRA_NODE_NAME, node.name)
-        putExtra(EXTRA_COUNTRY_NAME, node.countryName)
         putExtra(EXTRA_FLAG_EMOJI, node.flagEmoji)
-        putExtra(EXTRA_CLIENT_ADDRESS, node.clientAddress)
-        putExtra(EXTRA_DNS, node.dns)
-        putExtra(EXTRA_MTU, node.mtu)
         putExtra(EXTRA_ENDPOINT, node.formattedEndpoint)
-        putExtra(EXTRA_IP, node.ipAddress)
       }
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         context.startForegroundService(intent)
@@ -83,114 +75,103 @@ class ShenTunnelVpnService : VpnService() {
     }
   }
 
-  private var vpnInterface: ParcelFileDescriptor? = null
+  private var backend: Backend? = null
   private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
   private var telemetryJob: Job? = null
-  private var packetLoopJob: Job? = null
+
+  private val wireGuardTunnel = object : Tunnel {
+    override fun getName(): String = "SHENZeroTunnel"
+    override fun onStateChange(state: Tunnel.State) {
+      when (state) {
+        Tunnel.State.UP -> {
+          _tunnelState.value = TunnelState.CONNECTED
+          startTelemetry()
+        }
+        Tunnel.State.DOWN -> {
+          _tunnelState.value = TunnelState.DISCONNECTED
+          telemetryJob?.cancel()
+          stopForeground(STOP_FOREGROUND_REMOVE)
+          stopSelf()
+        }
+        Tunnel.State.TOGGLE -> {}
+      }
+    }
+  }
 
   override fun onCreate() {
     super.onCreate()
     createNotificationChannel()
+    try {
+      backend = GoBackend(applicationContext)
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
   }
+
+  override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
       ACTION_START -> {
-        val nodeId = intent.getStringExtra(EXTRA_NODE_ID) ?: "default"
+        val configText = intent.getStringExtra(EXTRA_CONFIG_TEXT) ?: ""
         val nodeName = intent.getStringExtra(EXTRA_NODE_NAME) ?: "SHΞN Zero Node"
-        val countryName = intent.getStringExtra(EXTRA_COUNTRY_NAME) ?: "Canada"
-        val flagEmoji = intent.getStringExtra(EXTRA_FLAG_EMOJI) ?: "🇨🇦"
-        val clientAddress = intent.getStringExtra(EXTRA_CLIENT_ADDRESS) ?: "10.66.66.2/32"
-        val dns = intent.getStringExtra(EXTRA_DNS) ?: "1.1.1.1, 1.0.0.1"
-        val mtu = intent.getIntExtra(EXTRA_MTU, 1280)
-        val endpoint = intent.getStringExtra(EXTRA_ENDPOINT) ?: "198.51.100.42:51820"
-        val ip = intent.getStringExtra(EXTRA_IP) ?: "198.51.100.42"
+        val flagEmoji = intent.getStringExtra(EXTRA_FLAG_EMOJI) ?: "🛡️"
+        val endpoint = intent.getStringExtra(EXTRA_ENDPOINT) ?: ""
 
-        val node = TunnelNode(
-          id = nodeId,
-          name = nodeName,
-          countryCode = "XX",
-          countryName = countryName,
-          flagEmoji = flagEmoji,
-          city = "Stealth Node",
-          endpointHost = endpoint.substringBefore(":"),
-          endpointPort = endpoint.substringAfter(":").toIntOrNull() ?: 51820,
-          ipAddress = ip,
-          publicKey = "",
-          clientPrivateKey = "",
-          clientAddress = clientAddress,
-          dns = dns,
-          mtu = mtu,
-          isHealthy = true
-        )
+        val connectingNotification = buildNotification(nodeName, flagEmoji, "Establishing WireGuard kernel tunnel...")
+        safeStartForeground(connectingNotification)
 
-        startTunnel(node)
+        startWireGuardTunnel(configText, nodeName, flagEmoji, endpoint)
       }
       ACTION_STOP -> {
-        stopTunnel()
+        stopWireGuardTunnel()
       }
     }
     return START_STICKY
   }
 
-  private fun startTunnel(node: TunnelNode) {
-    _tunnelState.value = TunnelState.CONNECTING
-    _activeNode.value = node
-
-    val connectingNotification = buildNotification(node, "Connecting zero-trust tunnel…")
-    safeStartForeground(connectingNotification)
-
-    try {
-      val builder = Builder()
-      builder.setSession("SHΞN™ tunnel ᴢᴇʀᴏ [${node.flagEmoji} ${node.countryName}]")
-
-      // Parse IPv4 address
-      val addressClean = node.clientAddress.substringBefore("/").trim()
-      val prefix = node.clientAddress.substringAfter("/", "32").trim().toIntOrNull() ?: 32
+  private fun startWireGuardTunnel(
+    configText: String,
+    nodeName: String,
+    flagEmoji: String,
+    endpoint: String
+  ) {
+    serviceScope.launch(Dispatchers.IO) {
       try {
-        builder.addAddress(addressClean, prefix)
-      } catch (e: Exception) {
-        builder.addAddress("10.210.230.254", 30)
-      }
-
-      // Add default zero-trust route
-      try {
-        builder.addRoute("0.0.0.0", 0)
-      } catch (_: Exception) {}
-
-      // Add DNS
-      node.dns.split(",").map { it.trim() }.forEach { dnsServer ->
-        if (dnsServer.isNotEmpty()) {
-          try {
-            builder.addDnsServer(dnsServer)
-          } catch (_: Exception) {}
+        _tunnelState.value = TunnelState.CONNECTING
+        if (backend == null) {
+          backend = GoBackend(applicationContext)
         }
-      }
 
-      builder.setMtu(node.mtu.coerceIn(1280, 1500))
-      builder.setBlocking(false)
+        val config = Config.parse(ByteArrayInputStream(configText.toByteArray()))
+        backend?.setState(wireGuardTunnel, Tunnel.State.UP, config)
 
-      try {
-        vpnInterface?.close()
-      } catch (_: Exception) {}
-      
-      vpnInterface = builder.establish()
-
-      if (vpnInterface != null) {
         _tunnelState.value = TunnelState.CONNECTED
-        val connectedNotification = buildNotification(node, "Connected: ${node.ipAddress}")
+        val connectedNotification = buildNotification(nodeName, flagEmoji, "Connected: $endpoint")
         safeStartForeground(connectedNotification)
-        startTelemetryAndPackets()
-      } else {
+        startTelemetry()
+      } catch (e: Exception) {
+        e.printStackTrace()
         _tunnelState.value = TunnelState.DISCONNECTED
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
       }
-    } catch (e: Exception) {
-      e.printStackTrace()
-      _tunnelState.value = TunnelState.DISCONNECTED
-      stopForeground(STOP_FOREGROUND_REMOVE)
-      stopSelf()
+    }
+  }
+
+  private fun stopWireGuardTunnel() {
+    serviceScope.launch(Dispatchers.IO) {
+      try {
+        _tunnelState.value = TunnelState.DISCONNECTING
+        backend?.setState(wireGuardTunnel, Tunnel.State.DOWN, null)
+      } catch (e: Exception) {
+        e.printStackTrace()
+      } finally {
+        _tunnelState.value = TunnelState.DISCONNECTED
+        telemetryJob?.cancel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+      }
     }
   }
 
@@ -205,124 +186,89 @@ class ShenTunnelVpnService : VpnService() {
       } else {
         startForeground(NOTIFICATION_ID, notification)
       }
-    } catch (e: Exception) {
+    } catch (_: Exception) {
       try {
         startForeground(NOTIFICATION_ID, notification)
       } catch (_: Exception) {}
     }
   }
 
-  private fun startTelemetryAndPackets() {
+  private fun startTelemetry() {
     telemetryJob?.cancel()
-    packetLoopJob?.cancel()
-
-    var seconds = 0L
-    var uploadedTotal = 120_000L
-    var downloadedTotal = 850_000L
-
-    // Non-blocking packet interface reading loop
-    vpnInterface?.let { pfd ->
-      packetLoopJob = serviceScope.launch(Dispatchers.IO) {
-        try {
-          val inputStream = FileInputStream(pfd.fileDescriptor)
-          val buffer = ByteBuffer.allocate(32768)
-
-          while (isActive && _tunnelState.value == TunnelState.CONNECTED) {
-            try {
-              if (pfd.fileDescriptor.valid()) {
-                val length = inputStream.channel.read(buffer)
-                if (length > 0) {
-                  uploadedTotal += length
-                  buffer.clear()
-                } else {
-                  delay(100)
-                }
-              } else {
-                break
-              }
-            } catch (_: Exception) {
-              break
-            }
-          }
-        } catch (_: Exception) {}
-      }
-    }
-
-    // Telemetry ticker
     telemetryJob = serviceScope.launch {
+      var seconds = 0L
       while (isActive && _tunnelState.value == TunnelState.CONNECTED) {
         delay(1000)
         seconds++
+        val stats = try {
+          backend?.getStatistics(wireGuardTunnel)
+        } catch (_: Exception) {
+          null
+        }
 
-        // Realistic dynamic stealth tunnel network flow rate
-        val upSpeed = Random.nextFloat() * 1200f + 350f
-        val downSpeed = Random.nextFloat() * 4500f + 1200f
+        val rx = stats?.totalRx() ?: 0L
+        val tx = stats?.totalTx() ?: 0L
 
-        uploadedTotal += (upSpeed * 128).toLong()
-        downloadedTotal += (downSpeed * 128).toLong()
+        val durationString = String.format(
+          "%02d:%02d:%02d",
+          seconds / 3600,
+          (seconds % 3600) / 60,
+          seconds % 60
+        )
 
         _telemetry.value = TelemetryStats(
-          uploadSpeedKbps = upSpeed,
-          downloadSpeedKbps = downSpeed,
-          totalUploadedBytes = uploadedTotal,
-          totalDownloadedBytes = downloadedTotal,
-          sessionDurationSeconds = seconds
+          uptimeSeconds = seconds,
+          durationFormatted = durationString,
+          downloadBytes = rx,
+          uploadBytes = tx,
+          activeHandshake = (rx > 0 || tx > 0)
         )
       }
     }
   }
 
-  private fun stopTunnel() {
-    _tunnelState.value = TunnelState.DISCONNECTING
-    telemetryJob?.cancel()
-    packetLoopJob?.cancel()
-
-    try {
-      vpnInterface?.close()
-      vpnInterface = null
-    } catch (_: Exception) {}
-
-    _tunnelState.value = TunnelState.DISCONNECTED
-    _activeNode.value = null
-    _telemetry.value = TelemetryStats()
-
-    stopForeground(STOP_FOREGROUND_REMOVE)
-    stopSelf()
-  }
-
-  override fun onDestroy() {
-    super.onDestroy()
-    stopTunnel()
-  }
-
-  private fun createNotificationChannel() {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      val name = "SHΞN™ tunnel ᴢᴇʀᴏ Service"
-      val descriptionText = "Zero-trust encrypted VPN tunnel status"
-      val importance = NotificationManager.IMPORTANCE_LOW
-      val channel = NotificationChannel(NOTIFICATION_CHANNEL_ID, name, importance).apply {
-        description = descriptionText
-      }
-      val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-      notificationManager.createNotificationChannel(channel)
+  private fun buildNotification(name: String, flag: String, statusText: String): Notification {
+    val openIntent = Intent(this, MainActivity::class.java).apply {
+      flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
     }
-  }
-
-  private fun buildNotification(node: TunnelNode, content: String): Notification {
     val pendingIntent = PendingIntent.getActivity(
       this,
       0,
-      Intent(this, MainActivity::class.java),
+      openIntent,
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
     return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-      .setContentTitle("SHΞN™ tunnel ᴢᴇʀᴏ [${node.flagEmoji} ${node.countryName}]")
-      .setContentText(content)
-      .setSmallIcon(R.mipmap.ic_launcher)
+      .setSmallIcon(R.drawable.ic_vpn_key)
+      .setContentTitle("SHΞN™ ᴢᴇʀᴏ [$flag $name]")
+      .setContentText(statusText)
       .setContentIntent(pendingIntent)
       .setOngoing(true)
+      .setOnlyAlertOnce(true)
       .setPriority(NotificationCompat.PRIORITY_LOW)
       .build()
+  }
+
+  private fun createNotificationChannel() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      val channel = NotificationChannel(
+        NOTIFICATION_CHANNEL_ID,
+        "SHΞN WireGuard Zero-Trust Tunnel",
+        NotificationManager.IMPORTANCE_LOW
+      ).apply {
+        description = "Active WireGuard native protocol connection status"
+        setShowBadge(false)
+      }
+      val manager = getSystemService(NotificationManager::class.java)
+      manager?.createNotificationChannel(channel)
+    }
+  }
+
+  override fun onDestroy() {
+    super.onDestroy()
+    try {
+      backend?.setState(wireGuardTunnel, Tunnel.State.DOWN, null)
+    } catch (_: Exception) {}
+    telemetryJob?.cancel()
   }
 }
