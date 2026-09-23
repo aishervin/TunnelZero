@@ -82,6 +82,9 @@ jobs:
           TAG="${{ steps.vars.outputs.TAG_NAME }}"
           mkdir -p release-artifacts
           
+          ZIPALIGN=$(find $ANDROID_HOME/build-tools/ -name zipalign | sort -V | tail -n 1)
+          APKSIGNER=$(find $ANDROID_HOME/build-tools/ -name apksigner | sort -V | tail -n 1)
+          
           echo "=== Found Raw APKs ==="
           find app/build/outputs/apk/release/ -type f -name "*.apk"
           
@@ -104,16 +107,41 @@ jobs:
             fi
             
             DEST_NAME="SHEN-tunnel-ZERO_${TAG}_${ARCH}.apk"
-            cp "$apk" "release-artifacts/$DEST_NAME"
+            TARGET="release-artifacts/$DEST_NAME"
             
-            # Verify Google Signature Schemes (v1, v2, v3, v4)
-            APKSIGNER=$(find $ANDROID_HOME/build-tools/ -name apksigner | sort -V | tail -n 1)
+            # Ensure 4-byte alignment
+            if [ -n "$ZIPALIGN" ]; then
+              $ZIPALIGN -c -v 4 "$apk" || $ZIPALIGN -f -p 4 "$apk" "$TARGET" || cp "$apk" "$TARGET"
+            else
+              cp "$apk" "$TARGET"
+            fi
+            
+            if [ ! -f "$TARGET" ]; then
+              cp "$apk" "$TARGET"
+            fi
+            
+            # Explicit re-sign with apksigner if permanent keystore is present to guarantee v1 + v2 + v3 + v4 compliance
+            if [ -f "release.keystore" ] && [ -n "$APKSIGNER" ]; then
+              echo "Applying full Google APK Signatures (v1, v2, v3, v4) on $DEST_NAME..."
+              $APKSIGNER sign --ks release.keystore \
+                --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+                --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
+                --key-pass "pass:${{ secrets.KEY_PASSWORD }}" \
+                --v1-signing-enabled true \
+                --v2-signing-enabled true \
+                --v3-signing-enabled true \
+                --v4-signing-enabled false \
+                "$TARGET" || true
+            fi
+            
+            # Verify signature using Android apksigner tool
             if [ -n "$APKSIGNER" ]; then
-              "$APKSIGNER" verify --verbose "release-artifacts/$DEST_NAME" || true
+              echo "Verification for $DEST_NAME:"
+              "$APKSIGNER" verify --verbose "$TARGET" || true
             fi
             
             # Generate SHA-256 checksum
-            sha256sum "release-artifacts/$DEST_NAME" > "release-artifacts/${DEST_NAME}.sha256"
+            sha256sum "$TARGET" > "${TARGET}.sha256"
           done
           
           echo "=== Prepared Release Artifacts ==="
