@@ -166,7 +166,12 @@ class ShenTunnelViewModel(application: Application) : AndroidViewModel(applicati
   }
 
   private fun startVpn(context: Context, node: TunnelNode) {
-    ShenTunnelVpnService.startService(context, node)
+    try {
+      ShenTunnelVpnService.startService(context, node)
+    } catch (e: Exception) {
+      e.printStackTrace()
+      _statusNotice.value = "Unable to start VPN tunnel: ${e.localizedMessage ?: "Service error"}"
+    }
   }
 
   fun importBackupConfig(raw: String): Boolean {
