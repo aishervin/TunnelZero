@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name">SHΞN™ tunnel ᴢᴇʀᴏ</string>
+    <string name="brand_subtitle">Zero-Trust WireGuard Stealth Engine</string>
+    <string name="status_disconnected">DISCONNECTED</string>
+    <string name="status_testing">PROBING NODES…</string>
+    <string name="status_connecting">ESTABLISHING TUNNEL…</string>
+    <string name="status_connected">PROTECTED &amp; ROUTED</string>
+    <string name="status_disconnecting">TERMINATING TUNNEL…</string>
+    <string name="action_connect">INITIATE TUNNEL</string>
+    <string name="action_disconnect">TERMINATE</string>
+    <string name="action_test_all">SCAN &amp; PING NODES</string>
+    <string name="label_select_node">SECURE RELAY NODES</string>
+    <string name="label_protocol">ENGINE: WIREGUARD 0-TRUST</string>
+    <string name="label_encryption">CIPHER: CHACHA20-POLY1305</string>
+    <string name="label_ip_identity">VIRTUAL IDENTITY</string>
+    <string name="label_session_time">UPTIME</string>
+    <string name="label_data_transferred">TRAFFIC</string>
+    <string name="notification_title">SHΞN™ tunnel ᴢᴇʀᴏ Active</string>
+    <string name="notification_desc">Secure zero-trust encrypted traffic</string>
+</resources>

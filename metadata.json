@@ -1,0 +1,6 @@
+{
+  "name": "SHΞN™ tunnel ᴢᴇʀᴏ",
+  "description": "Zero-trust encrypted WireGuard stealth tunnel with resilient built-in node testing and real-time telemetry.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
