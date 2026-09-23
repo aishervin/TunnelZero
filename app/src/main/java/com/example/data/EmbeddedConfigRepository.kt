@@ -207,6 +207,111 @@ class EmbeddedConfigRepository(private val context: Context) {
     return defaultNodes
   }
 
+  suspend fun fetchRemoteWireGuardConfigs(
+    url: String = "https://raw.githubusercontent.com/aishervin/WG/refs/heads/main/TunnelZero.md"
+  ): List<TunnelNode> = withContext(Dispatchers.IO) {
+    try {
+      val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+      connection.requestMethod = "GET"
+      connection.connectTimeout = 8000
+      connection.readTimeout = 8000
+      connection.setRequestProperty("User-Agent", "SHEN-TunnelZero/1.0")
+
+      if (connection.responseCode == 200) {
+        val content = connection.inputStream.bufferedReader().use { it.readText() }
+        val parsed = parseMultipleWireGuardConfigs(content)
+        if (parsed.isNotEmpty()) {
+          saveNodes(parsed)
+          return@withContext parsed
+        }
+      }
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
+    // If fetching fails, return cached or fallback nodes
+    getNodes()
+  }
+
+  fun parseMultipleWireGuardConfigs(raw: String): List<TunnelNode> {
+    val results = mutableListOf<TunnelNode>()
+    // The raw markdown / text can contain multiple [Interface] blocks
+    val blocks = raw.split("(?=\\[Interface\\])".toRegex())
+      .map { it.trim() }
+      .filter { it.contains("[Interface]") && it.contains("[Peer]") }
+
+    blocks.forEachIndexed { index, block ->
+      val node = parseWireGuardConfBlock(block, index + 1)
+      if (node != null) {
+        results.add(node)
+      }
+    }
+    return results
+  }
+
+  private fun parseWireGuardConfBlock(conf: String, index: Int): TunnelNode? {
+    return try {
+      var privateKey = ""
+      var address = "10.210.230.254/30"
+      var dns = "1.1.1.1, 8.8.8.8"
+      var mtu = 1450
+      var publicKey = ""
+      var endpoint = ""
+      var allowedIPs = "0.0.0.0/0"
+
+      conf.lineSequence().forEach { rawLine ->
+        val line = rawLine.substringBefore("#").trim()
+        val parts = line.split("=", limit = 2).map { it.trim() }
+        if (parts.size == 2) {
+          when (parts[0].lowercase()) {
+            "privatekey" -> privateKey = parts[1]
+            "address" -> address = parts[1]
+            "dns" -> dns = parts[1]
+            "mtu" -> mtu = parts[1].toIntOrNull() ?: 1450
+            "publickey" -> publicKey = parts[1]
+            "endpoint" -> endpoint = parts[1]
+            "allowedips" -> allowedIPs = parts[1]
+          }
+        }
+      }
+
+      if (endpoint.isEmpty()) return null
+
+      val host = endpoint.substringBeforeLast(":")
+      val port = endpoint.substringAfterLast(":").toIntOrNull() ?: 51820
+
+      // Map IP/Host to clean node identity
+      val (flag, country, city, code) = when {
+        host.startsWith("162.141.") || host.startsWith("104.") -> Quadruple("⚡", "Global Edge", "Stealth Node #$index", "GE")
+        host.startsWith("185.") || host.startsWith("194.") -> Quadruple("🇩🇪", "Germany", "Frankfurt #$index", "DE")
+        else -> Quadruple("🛡️", "SHΞN Zero", "Secure Tunnel #$index", "SZ")
+      }
+
+      TunnelNode(
+        id = "remote-node-$index-${host.replace(".", "-")}",
+        name = "SHΞN Zero-Trust #0$index",
+        countryCode = code,
+        countryName = country,
+        flagEmoji = flag,
+        city = city,
+        endpointHost = host,
+        endpointPort = port,
+        ipAddress = host,
+        publicKey = publicKey,
+        clientPrivateKey = privateKey,
+        clientAddress = address,
+        dns = dns,
+        mtu = mtu,
+        tag = "Live WireGuard",
+        latencyMs = -1L,
+        isHealthy = false
+      )
+    } catch (_: Exception) {
+      null
+    }
+  }
+
+  private data class Quadruple(val first: String, val second: String, val third: String, val fourth: String)
+
   /**
    * Performs an actual socket reachability check with real round-trip timing.
    * If socket to port is blocked by firewall/NAT, falls back to DNS probe socket to measure
