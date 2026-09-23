@@ -58,12 +58,61 @@ class ShenTunnelViewModel(application: Application) : AndroidViewModel(applicati
 
   fun loadNodesAndProbe() {
     viewModelScope.launch {
-      val loaded = repository.getNodes()
-      _nodes.value = loaded
-      if (_selectedNode.value == null && loaded.isNotEmpty()) {
-        _selectedNode.value = loaded.first()
+      val cached = repository.getNodes()
+      if (cached.isNotEmpty()) {
+        _nodes.value = cached
+        if (_selectedNode.value == null) {
+          _selectedNode.value = cached.first()
+        }
       }
-      probeAllNodes()
+      refreshRemoteNodesAndProbe()
+    }
+  }
+
+  fun refreshRemoteNodesAndProbe() {
+    if (_isProbing.value) return
+    viewModelScope.launch {
+      _isProbing.value = true
+      _statusNotice.value = "Fetching live WireGuard configurations from remote repository…"
+
+      val remoteNodes = repository.fetchRemoteWireGuardConfigs()
+      if (remoteNodes.isNotEmpty()) {
+        _nodes.value = remoteNodes
+        if (_selectedNode.value == null || !remoteNodes.any { it.id == _selectedNode.value?.id }) {
+          _selectedNode.value = remoteNodes.first()
+        }
+      }
+
+      _statusNotice.value = "Scanning & testing all secure nodes…"
+      val currentList = _nodes.value
+      val deferreds = currentList.map { node ->
+        async {
+          val latency = repository.probeNode(node)
+          node.copy(
+            latencyMs = latency,
+            isHealthy = latency > 0,
+            isProbing = false
+          )
+        }
+      }
+
+      val tested = deferreds.awaitAll()
+      _nodes.value = tested
+      repository.saveNodes(tested)
+
+      _selectedNode.value?.let { current ->
+        val updatedSelected = tested.find { it.id == current.id }
+        if (updatedSelected != null) {
+          _selectedNode.value = updatedSelected
+        } else {
+          _selectedNode.value = tested.firstOrNull { it.isHealthy } ?: tested.firstOrNull()
+        }
+      } ?: run {
+        _selectedNode.value = tested.firstOrNull { it.isHealthy } ?: tested.firstOrNull()
+      }
+
+      _isProbing.value = false
+      _statusNotice.value = "Updated ${tested.size} live WireGuard nodes (${tested.count { it.isHealthy }} online)"
     }
   }
 
@@ -85,42 +134,7 @@ class ShenTunnelViewModel(application: Application) : AndroidViewModel(applicati
   }
 
   fun probeAllNodes() {
-    if (_isProbing.value) return
-    viewModelScope.launch {
-      _isProbing.value = true
-      _statusNotice.value = "Scanning & testing all secure nodes…"
-
-      val currentList = _nodes.value
-      val deferreds = currentList.map { node ->
-        async {
-          val latency = repository.probeNode(node)
-          node.copy(
-            latencyMs = latency,
-            isHealthy = latency > 0,
-            isProbing = false
-          )
-        }
-      }
-
-      val tested = deferreds.awaitAll()
-      _nodes.value = tested
-      repository.saveNodes(tested)
-
-      // Keep selected node updated
-      _selectedNode.value?.let { current ->
-        val updatedSelected = tested.find { it.id == current.id }
-        if (updatedSelected != null) {
-          _selectedNode.value = updatedSelected
-        } else {
-          _selectedNode.value = tested.firstOrNull { it.isHealthy } ?: tested.firstOrNull()
-        }
-      } ?: run {
-        _selectedNode.value = tested.firstOrNull { it.isHealthy } ?: tested.firstOrNull()
-      }
-
-      _isProbing.value = false
-      _statusNotice.value = "Probe complete: ${tested.count { it.isHealthy }}/${tested.size} nodes verified"
-    }
+    refreshRemoteNodesAndProbe()
   }
 
   fun handleConnectClick(
